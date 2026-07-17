@@ -2162,6 +2162,17 @@ function stripAudioTags(text: string): string {
     .trim();
 }
 
+function hasAudioTags(text: string): boolean {
+  return stripAudioTags(text) !== text.trim();
+}
+
+function normalizeSpeakInput(input: SpeakInput): SpeakInput {
+  return {
+    ...input,
+    raw_tags: input.raw_tags ?? hasAudioTags(input.text),
+  };
+}
+
 interface VisibleCaptionChar {
   value: string;
   visibleIndex: number;
@@ -2889,7 +2900,7 @@ function createVoiceServer(env: Env, origin: string): McpServer {
       },
     },
     async ({ text, style, raw_tags }) => {
-      const input = { text, style, raw_tags };
+      const input = normalizeSpeakInput({ text, style, raw_tags });
       const inputError = getSpeakInputError(input.text);
       if (inputError) {
         return {
@@ -3037,10 +3048,36 @@ export default {
       }, { headers: corsHeaders });
     }
 
-    // Direct audio API
-    if (path === '/speak' && request.method === 'GET') {
-      const text = url.searchParams.get('text');
-      const textValue = text || "";
+    // Direct audio API. POST avoids URL-length limits for long voice scripts.
+    if (path === '/speak' && (request.method === 'GET' || request.method === 'POST')) {
+      let textValue = "";
+      let style: string | undefined;
+      let rawTags: boolean | undefined;
+      if (request.method === 'GET') {
+        textValue = url.searchParams.get('text') || "";
+        style = url.searchParams.get('style') || undefined;
+        rawTags = parseRawTags(url.searchParams.get('raw_tags'));
+      } else {
+        let body: unknown;
+        try {
+          body = await request.json();
+        } catch (_error) {
+          return Response.json({ error: 'Invalid JSON body' }, {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return Response.json({ error: 'JSON body must be an object' }, {
+            status: 400,
+            headers: corsHeaders,
+          });
+        }
+        const payload = body as Record<string, unknown>;
+        textValue = typeof payload.text === 'string' ? payload.text : "";
+        style = typeof payload.style === 'string' ? payload.style : undefined;
+        rawTags = typeof payload.raw_tags === 'boolean' ? payload.raw_tags : undefined;
+      }
       const inputError = getSpeakInputError(textValue);
       if (inputError) {
         return Response.json({ error: inputError }, {
@@ -3049,11 +3086,11 @@ export default {
         });
       }
 
-      const input = {
+      const input = normalizeSpeakInput({
         text: textValue,
-        style: url.searchParams.get('style') || undefined,
-        raw_tags: parseRawTags(url.searchParams.get('raw_tags')),
-      };
+        style,
+        raw_tags: rawTags,
+      });
       const result = await generateAudio(env, input);
 
       if (result.success && result.audio_base64) {

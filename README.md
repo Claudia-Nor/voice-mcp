@@ -153,7 +153,9 @@ npx wrangler deploy
 | `GET /history?id=...` | Load an ElevenLabs history item into the visualizer |
 | `GET /speak?text=Hello` | Direct audio file |
 | `GET /speak?text=Hello&style=soft` | Direct audio file with optional style |
-| `GET /speak?text=[whispers]%20Hello&raw_tags=true` | Preserve ElevenLabs v3 audio tags |
+| `GET /speak?text=[whispers]%20Hello` | Preserve detected ElevenLabs v3 audio tags |
+| `GET /speak?text=[whispers]%20Hello&raw_tags=false` | Strip audio tags explicitly |
+| `POST /speak` with `{ "text": "...", "style": "soft" }` | Direct audio file without URL-length limits |
 | `GET /status` | Health check |
 
 The MCP `speak` tool accepts:
@@ -170,9 +172,10 @@ visualizer loads it and enables playback.
 ElevenLabs uses the speech-with-timing API to store line-level caption cues for
 sync; providers without timing data fall back to approximate caption progress.
 
-When `TTS_PROVIDER=elevenlabs` and `ELEVENLABS_MODEL_ID=eleven_v3`, `raw_tags=true`
-passes text through unchanged. Without `raw_tags=true`, supported styles map to
-ElevenLabs v3 audio tags:
+When `TTS_PROVIDER=elevenlabs` and `ELEVENLABS_MODEL_ID=eleven_v3`, detected
+audio tags such as `[whispers]` and `[sighs]` are preserved automatically.
+You can still pass `raw_tags=false` to strip them explicitly. Without raw tags,
+supported styles map to ElevenLabs v3 audio tags:
 
 | Style | Audio tag |
 |-------|-----------|
