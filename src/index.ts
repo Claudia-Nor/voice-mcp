@@ -2897,6 +2897,7 @@ function createVoiceServer(env: Env, origin: string): McpServer {
       _meta: {
         ui: { resourceUri: VOICE_RESOURCE_URI },
         "ui/resourceUri": VOICE_RESOURCE_URI,
+        "openai/outputTemplate": VOICE_RESOURCE_URI,
       },
     },
     async ({ text, style, raw_tags }) => {
