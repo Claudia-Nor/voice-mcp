@@ -103,7 +103,7 @@ interface ElevenLabsHistoryItem {
 // =============================================================================
 
 const EXT_APPS_MIME = "text/html;profile=mcp-app" as const;
-const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v5.html";
+const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v6.html";
 const LATEST_VOICE_CACHE_PATH = "/__voice-mcp/latest-voice-event";
 
 // =============================================================================
@@ -348,16 +348,65 @@ function getPlayerHTML(botName: string): string {
     }
     
     let hasRenderedResult = false;
+    let renderedVoiceSignature = '';
+    let savedVoiceSignature = '';
 
-    function handleData(data) {
+    function getVoiceSignature(data) {
+      if (!data || !data.text || !data.audio_base64) return '';
+
+      return String(data.text) + ':' +
+        String(data.audio_base64.length) + ':' +
+        data.audio_base64.slice(0, 24);
+    }
+
+    function saveVoiceState(data) {
+      const openai = window.openai;
+
+      if (
+        !openai ||
+        typeof openai.setWidgetState !== 'function'
+      ) return;
+
+      const signature = getVoiceSignature(data);
+      if (!signature || signature === savedVoiceSignature) return;
+
+      try {
+        openai.setWidgetState({
+          modelContent: data.text,
+          privateContent: {
+            voice: {
+              text: data.text,
+              audio_base64: data.audio_base64
+            }
+          }
+        });
+
+        savedVoiceSignature = signature;
+      } catch (_error) {
+        // Live player can still work if persistence is unavailable.
+      }
+    }
+
+    function handleData(data, persist) {
+      if (!data) return;
+
       if (data.error) {
         showError(data.error);
         return;
       }
 
       if (data.audio_base64 && data.text) {
+        const signature = getVoiceSignature(data);
         hasRenderedResult = true;
-        renderPlayer(data.text, data.audio_base64);
+
+        if (signature !== renderedVoiceSignature) {
+          renderedVoiceSignature = signature;
+          renderPlayer(data.text, data.audio_base64);
+        }
+
+        if (persist !== false) {
+          saveVoiceState(data);
+        }
       }
     }
 
@@ -390,10 +439,65 @@ function getPlayerHTML(botName: string): string {
       });
     }
 
-    function readChatGPTToolOutput() {
-      const output = window.openai && window.openai.toolOutput;
-      if (output) handleData(output);
+function getMetadataOutput(metadata) {
+  if (!metadata || typeof metadata !== 'object') return null;
+
+  let result =
+    metadata.mcp_tool_result ||
+    metadata.call_tool_result ||
+    metadata.mcpToolResult ||
+    metadata.callToolResult;
+
+  if (typeof result === 'string') {
+    try {
+      result = JSON.parse(result);
+    } catch (_error) {
+      return null;
     }
+  }
+
+  if (!result || typeof result !== 'object') return null;
+
+  return (
+    result.structuredContent ||
+    result.structured_content ||
+    (result.result && (
+      result.result.structuredContent ||
+      result.result.structured_content
+    )) ||
+    null
+  );
+}
+
+function readChatGPTToolOutput(source) {
+  const openai = source || window.openai;
+  if (!openai) return;
+
+  const directOutput = openai.toolOutput;
+  if (directOutput) {
+    handleData(directOutput);
+    return;
+  }
+
+  const metadataOutput =
+    getMetadataOutput(openai.toolResponseMetadata);
+
+  if (metadataOutput) {
+    handleData(metadataOutput);
+    return;
+  }
+
+  const state = openai.widgetState;
+  const privateContent =
+    state && (state.privateContent || state.private_content);
+  const savedVoice =
+    (privateContent && privateContent.voice) ||
+    (state && state.voice);
+
+  if (savedVoice) {
+    handleData(savedVoice, false);
+  }
+}
 
     window.addEventListener('message', function(event) {
       if (event.source !== window.parent) return;
@@ -428,15 +532,12 @@ function getPlayerHTML(botName: string): string {
       }
     });
 
-    window.addEventListener('openai:set_globals', function(event) {
-      const detail = event.detail;
-      const globals = detail && (detail.globals || detail);
-      const output =
-        (globals && globals.toolOutput) ||
-        (window.openai && window.openai.toolOutput);
+window.addEventListener('openai:set_globals', function(event) {
+  const detail = event.detail;
+  const globals = detail && (detail.globals || detail);
 
-      if (output) handleData(output);
-    });
+  readChatGPTToolOutput(globals || window.openai);
+});
 
     async function initializeApp() {
       try {
