@@ -103,7 +103,7 @@ interface ElevenLabsHistoryItem {
 // =============================================================================
 
 const EXT_APPS_MIME = "text/html;profile=mcp-app" as const;
-const VOICE_RESOURCE_URI = "ui://voice-mcp/player.html";
+const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v2.html";
 const LATEST_VOICE_CACHE_PATH = "/__voice-mcp/latest-voice-event";
 
 // =============================================================================
@@ -347,37 +347,96 @@ function getPlayerHTML(botName: string): string {
       }, 150);
     }
     
+    let hasRenderedResult = false;
+
     function handleData(data) {
-      if (data.error) { showError(data.error); return; }
+      if (data.error) {
+        showError(data.error);
+        return;
+      }
+
       if (data.audio_base64 && data.text) {
+        hasRenderedResult = true;
         renderPlayer(data.text, data.audio_base64);
       }
     }
-    
+
     function sendToHost(method, params, id) {
-      const msg = { jsonrpc: '2.0', method: method, params: params || {} };
+      const msg = {
+        jsonrpc: '2.0',
+        method: method,
+        params: params || {}
+      };
+
       if (id !== undefined) msg.id = id;
       window.parent.postMessage(msg, '*');
     }
-    
+
+    function readChatGPTToolOutput() {
+      const output = window.openai && window.openai.toolOutput;
+      if (output) handleData(output);
+    }
+
+    let initialized = false;
+
+    function finishInitialization() {
+      if (initialized) return;
+      initialized = true;
+
+      sendToHost('ui/notifications/initialized', {});
+      readChatGPTToolOutput();
+    }
+
     window.addEventListener('message', function(event) {
+      if (event.source && event.source !== window.parent) return;
+
       const msg = event.data;
       if (!msg || typeof msg !== 'object') return;
-      
+
       if (msg.jsonrpc === '2.0') {
-        if (msg.method === 'ui/notifications/tool-input') {
-          contentEl.innerHTML = '<div class="loading">Generating voice...</div>';
+        if (msg.id === 1 && msg.result) {
+          finishInitialization();
+          return;
         }
+
+        if (msg.method === 'ui/notifications/tool-input') {
+          if (!hasRenderedResult) {
+            contentEl.innerHTML =
+              '<div class="loading">Generating voice...</div>';
+          }
+        }
+
         if (msg.method === 'ui/notifications/tool-result') {
-          const structured = msg.params?.structuredContent;
+          const structured =
+            msg.params && msg.params.structuredContent;
+
           if (structured) handleData(structured);
         }
       }
-      if (msg.structuredContent) handleData(msg.structuredContent);
+
+      if (msg.structuredContent) {
+        handleData(msg.structuredContent);
+      }
     });
-    
-    sendToHost('ui/initialize', { name: 'voice-mcp', version: '1.0.0' }, 1);
-    setTimeout(function() { sendToHost('ui/notifications/initialized', {}); }, 50);
+
+    window.addEventListener('openai:set_globals', function(event) {
+      const detail = event.detail;
+      const globals = detail && (detail.globals || detail);
+      const output = globals && globals.toolOutput;
+
+      if (output) handleData(output);
+    });
+
+    readChatGPTToolOutput();
+
+    sendToHost('ui/initialize', {
+      protocolVersion: '2026-01-26',
+      appInfo: {
+        name: 'voice-mcp',
+        version: '1.0.1'
+      },
+      appCapabilities: {}
+    }, 1);
   </script>
 </body>
 </html>`;
