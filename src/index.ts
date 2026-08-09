@@ -103,7 +103,7 @@ interface ElevenLabsHistoryItem {
 // =============================================================================
 
 const EXT_APPS_MIME = "text/html;profile=mcp-app" as const;
-const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v2.html";
+const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v3.html";
 const LATEST_VOICE_CACHE_PATH = "/__voice-mcp/latest-voice-event";
 
 // =============================================================================
@@ -394,7 +394,7 @@ function getPlayerHTML(botName: string): string {
       if (!msg || typeof msg !== 'object') return;
 
       if (msg.jsonrpc === '2.0') {
-        if (msg.id === 1 && msg.result) {
+        if (msg.id === 1 && (msg.result || msg.error)) {
           finishInitialization();
           return;
         }
@@ -437,6 +437,7 @@ function getPlayerHTML(botName: string): string {
       },
       appCapabilities: {}
     }, 1);
+    setTimeout(finishInitialization, 250);
   </script>
 </body>
 </html>`;
