@@ -45,6 +45,7 @@ interface SpeakInput {
   text: string;
   style?: string;
   raw_tags?: boolean;
+  request_id?: string;
 }
 
 interface AudioResult {
@@ -103,14 +104,16 @@ interface ElevenLabsHistoryItem {
 // =============================================================================
 
 const EXT_APPS_MIME = "text/html;profile=mcp-app" as const;
-const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v6.html";
+const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v7.html";
 const LATEST_VOICE_CACHE_PATH = "/__voice-mcp/latest-voice-event";
+const VOICE_EVENT_CACHE_PATH = "/__voice-mcp/voice-events/";
+const VOICE_EVENT_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30;
 
 // =============================================================================
 // Audio Player HTML (WeChat-style UI)
 // =============================================================================
 
-function getPlayerHTML(botName: string): string {
+function getPlayerHTML(botName: string, apiOrigin: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -237,7 +240,8 @@ function getPlayerHTML(botName: string): string {
 
   <script>
     const contentEl = document.getElementById('content');
-    const BOT_NAME = '${botName}';
+    const BOT_NAME = ${JSON.stringify(botName)};
+    const API_ORIGIN = ${JSON.stringify(apiOrigin)};
     let audio = null;
     let waveInterval = null;
     
@@ -350,24 +354,28 @@ function getPlayerHTML(botName: string): string {
     let hasRenderedResult = false;
     let renderedVoiceSignature = '';
     let savedVoiceSignature = '';
+    let restoringEventId = '';
 
     function getVoiceSignature(data) {
       if (!data || !data.text || !data.audio_base64) return '';
 
       return String(data.text) + ':' +
         String(data.audio_base64.length) + ':' +
-        data.audio_base64.slice(0, 24);
+        data.audio_base64.slice(0, 24) + ':' +
+        data.audio_base64.slice(-24);
     }
 
     function saveVoiceState(data) {
       const openai = window.openai;
+      const eventId = String(data.event_id || data.id || '').trim();
 
       if (
+        !eventId ||
         !openai ||
         typeof openai.setWidgetState !== 'function'
       ) return;
 
-      const signature = getVoiceSignature(data);
+      const signature = eventId;
       if (!signature || signature === savedVoiceSignature) return;
 
       try {
@@ -376,7 +384,7 @@ function getPlayerHTML(botName: string): string {
           privateContent: {
             voice: {
               text: data.text,
-              audio_base64: data.audio_base64
+              event_id: eventId
             }
           }
         });
@@ -407,6 +415,51 @@ function getPlayerHTML(botName: string): string {
         if (persist !== false) {
           saveVoiceState(data);
         }
+      }
+    }
+
+    async function restoreVoiceEvent(eventId) {
+      const normalizedId = String(eventId || '').trim();
+
+      if (
+        hasRenderedResult ||
+        !/^[A-Za-z0-9_-]{8,128}$/.test(normalizedId) ||
+        restoringEventId === normalizedId
+      ) return;
+
+      restoringEventId = normalizedId;
+
+      try {
+        const response = await fetch(
+          API_ORIGIN + '/events/' + encodeURIComponent(normalizedId),
+          { method: 'GET', cache: 'no-store' }
+        );
+
+        if (!response.ok) return;
+
+        const payload = await response.json();
+        if (payload && payload.event) {
+          handleData(payload.event);
+        }
+      } catch (_error) {
+        // The live tool result can still render if restoration is unavailable.
+      }
+    }
+
+    function getToolInput(value) {
+      if (!value || typeof value !== 'object') return null;
+      return value.arguments || value;
+    }
+
+    function readChatGPTToolInput(source) {
+      const openai = source || window.openai;
+      const input = getToolInput(
+        (openai && openai.toolInput) ||
+        (window.openai && window.openai.toolInput)
+      );
+
+      if (input && input.request_id) {
+        restoreVoiceEvent(input.request_id);
       }
     }
 
@@ -495,7 +548,11 @@ function readChatGPTToolOutput(source) {
     (state && state.voice);
 
   if (savedVoice) {
-    handleData(savedVoice, false);
+    if (savedVoice.audio_base64) {
+      handleData(savedVoice, false);
+    } else {
+      restoreVoiceEvent(savedVoice.event_id || savedVoice.id);
+    }
   }
 }
 
@@ -522,6 +579,11 @@ function readChatGPTToolOutput(source) {
           contentEl.innerHTML =
             '<div class="loading">Generating voice...</div>';
         }
+
+        const input = getToolInput(msg.params);
+        if (input && input.request_id) {
+          restoreVoiceEvent(input.request_id);
+        }
       }
 
       if (msg.method === 'ui/notifications/tool-result') {
@@ -535,8 +597,10 @@ function readChatGPTToolOutput(source) {
 window.addEventListener('openai:set_globals', function(event) {
   const detail = event.detail;
   const globals = detail && (detail.globals || detail);
+  const openai = window.openai || globals;
 
-  readChatGPTToolOutput(globals || window.openai);
+  readChatGPTToolOutput(openai);
+  readChatGPTToolInput(openai);
 });
 
     async function initializeApp() {
@@ -556,12 +620,14 @@ window.addEventListener('openai:set_globals', function(event) {
         );
 
         readChatGPTToolOutput();
+        readChatGPTToolInput();
       } catch (error) {
         showError('Player initialization failed.');
       }
     }
 
     readChatGPTToolOutput();
+    readChatGPTToolInput();
     initializeApp();
   </script>
 </body>
@@ -2998,6 +3064,19 @@ function getLatestVoiceCacheRequest(origin: string): Request {
   return new Request(new URL(LATEST_VOICE_CACHE_PATH, origin).toString(), { method: "GET" });
 }
 
+function normalizeVoiceEventId(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized || !/^[A-Za-z0-9_-]{8,128}$/.test(normalized)) return undefined;
+  return normalized;
+}
+
+function getVoiceEventCacheRequest(origin: string, eventId: string): Request {
+  return new Request(
+    new URL(`${VOICE_EVENT_CACHE_PATH}${encodeURIComponent(eventId)}`, origin).toString(),
+    { method: "GET" },
+  );
+}
+
 function createVoiceEvent(env: Env, input: SpeakInput, result: AudioResult): VoiceEvent {
   const provider = getTtsProvider(env);
   const finalText = result.final_text || input.text;
@@ -3005,7 +3084,7 @@ function createVoiceEvent(env: Env, input: SpeakInput, result: AudioResult): Voi
   const captionCues = createCaptionCues(finalText, alignment);
 
   return {
-    id: crypto.randomUUID(),
+    id: normalizeVoiceEventId(input.request_id) || crypto.randomUUID(),
     text: input.text,
     audio_base64: result.audio_base64 || "",
     created_at: new Date().toISOString(),
@@ -3034,13 +3113,36 @@ async function readLatestVoiceEvent(origin: string): Promise<VoiceEvent | null> 
   return await response.json<VoiceEvent>();
 }
 
+async function storeVoiceEvent(origin: string, event: VoiceEvent): Promise<void> {
+  await Promise.all([
+    storeLatestVoiceEvent(origin, event),
+    caches.default.put(
+      getVoiceEventCacheRequest(origin, event.id),
+      Response.json(event, {
+        headers: {
+          "Cache-Control": `public, max-age=${VOICE_EVENT_CACHE_TTL_SECONDS}`,
+        },
+      }),
+    ),
+  ]);
+}
+
+async function readVoiceEvent(origin: string, eventId: string): Promise<VoiceEvent | null> {
+  const normalizedId = normalizeVoiceEventId(eventId);
+  if (!normalizedId) return null;
+
+  const response = await caches.default.match(getVoiceEventCacheRequest(origin, normalizedId));
+  if (!response) return null;
+  return await response.json<VoiceEvent>();
+}
+
 // =============================================================================
 // MCP Server Factory
 // =============================================================================
 
 function createVoiceServer(env: Env, origin: string): McpServer {
   const botName = env.BOT_NAME || 'AI';
-  const PLAYER_HTML = getPlayerHTML(botName);
+  const PLAYER_HTML = getPlayerHTML(botName, origin);
 
   const server = new McpServer({
     name: "voice-mcp",
@@ -3064,6 +3166,20 @@ function createVoiceServer(env: Env, origin: string): McpServer {
           uri: VOICE_RESOURCE_URI,
           mimeType: EXT_APPS_MIME,
           text: PLAYER_HTML,
+          _meta: {
+            ui: {
+              prefersBorder: true,
+              csp: {
+                connectDomains: [origin],
+                resourceDomains: [],
+              },
+            },
+            "openai/widgetPrefersBorder": true,
+            "openai/widgetCSP": {
+              connect_domains: [origin],
+              resource_domains: [],
+            },
+          },
         },
       ],
     }),
@@ -3076,6 +3192,11 @@ function createVoiceServer(env: Env, origin: string): McpServer {
       description: `Make ${botName} speak with a custom cloned voice. The audio will play in an inline player.`,
       inputSchema: z.object({
         text: z.string().describe("Text to speak"),
+        request_id: z.string()
+          .min(8)
+          .max(128)
+          .regex(/^[A-Za-z0-9_-]+$/)
+          .describe("Generate a fresh UUID for every speak call so its audio player can be restored"),
         style: z.string().optional().describe("Optional speaking style"),
         raw_tags: z.boolean().optional().describe("Allow raw ElevenLabs v3 audio tags when supported"),
       }),
@@ -3085,8 +3206,8 @@ function createVoiceServer(env: Env, origin: string): McpServer {
         "openai/outputTemplate": VOICE_RESOURCE_URI,
       },
     },
-    async ({ text, style, raw_tags }) => {
-      const input = normalizeSpeakInput({ text, style, raw_tags });
+    async ({ text, request_id, style, raw_tags }) => {
+      const input = normalizeSpeakInput({ text, request_id, style, raw_tags });
       const inputError = getSpeakInputError(input.text);
       if (inputError) {
         return {
@@ -3102,10 +3223,12 @@ function createVoiceServer(env: Env, origin: string): McpServer {
       const result = await generateAudio(env, input);
 
       if (result.success && result.audio_base64) {
+        const event = createVoiceEvent(env, input, result);
+
         try {
-          await storeLatestVoiceEvent(origin, createVoiceEvent(env, input, result));
+          await storeVoiceEvent(origin, event);
         } catch (error) {
-          console.error("Failed to store latest voice event", error);
+          console.error("Failed to store voice event", error);
         }
 
         return {
@@ -3115,6 +3238,7 @@ function createVoiceServer(env: Env, origin: string): McpServer {
           structuredContent: {
             text: text,
             audio_base64: result.audio_base64,
+            event_id: event.id,
           },
         };
       }
@@ -3185,6 +3309,36 @@ export default {
         });
       }
       return Response.json({ event }, {
+        headers: {
+          ...corsHeaders,
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
+    if (path.startsWith('/events/') && request.method === 'GET') {
+      let eventId = "";
+
+      try {
+        eventId = decodeURIComponent(path.slice('/events/'.length));
+      } catch (_error) {
+        return Response.json({ error: 'Invalid event id' }, {
+          status: 400,
+          headers: corsHeaders,
+        });
+      }
+
+      const normalizedId = normalizeVoiceEventId(eventId);
+      if (!normalizedId) {
+        return Response.json({ error: 'Invalid event id' }, {
+          status: 400,
+          headers: corsHeaders,
+        });
+      }
+
+      const event = await readVoiceEvent(url.origin, normalizedId);
+      return Response.json({ event }, {
+        status: event ? 200 : 404,
         headers: {
           ...corsHeaders,
           "Cache-Control": "no-store",
