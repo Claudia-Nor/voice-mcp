@@ -103,7 +103,7 @@ interface ElevenLabsHistoryItem {
 // =============================================================================
 
 const EXT_APPS_MIME = "text/html;profile=mcp-app" as const;
-const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v3.html";
+const VOICE_RESOURCE_URI = "ui://voice-mcp/player-v4.html";
 const LATEST_VOICE_CACHE_PATH = "/__voice-mcp/latest-voice-event";
 
 // =============================================================================
@@ -388,16 +388,11 @@ function getPlayerHTML(botName: string): string {
     }
 
     window.addEventListener('message', function(event) {
-      if (event.source && event.source !== window.parent) return;
 
       const msg = event.data;
       if (!msg || typeof msg !== 'object') return;
 
       if (msg.jsonrpc === '2.0') {
-        if (msg.id === 1 && (msg.result || msg.error)) {
-          finishInitialization();
-          return;
-        }
 
         if (msg.method === 'ui/notifications/tool-input') {
           if (!hasRenderedResult) {
@@ -429,15 +424,13 @@ function getPlayerHTML(botName: string): string {
 
     readChatGPTToolOutput();
 
-    sendToHost('ui/initialize', {
-      protocolVersion: '2026-01-26',
-      appInfo: {
-        name: 'voice-mcp',
-        version: '1.0.1'
-      },
-      appCapabilities: {}
-    }, 1);
-    setTimeout(finishInitialization, 250);
+sendToHost(
+  'ui/initialize',
+  { name: 'voice-mcp', version: '1.0.1' },
+  1
+);
+
+setTimeout(finishInitialization, 50);
   </script>
 </body>
 </html>`;
